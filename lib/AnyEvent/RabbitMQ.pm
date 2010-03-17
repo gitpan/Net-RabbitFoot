@@ -15,7 +15,7 @@ use Net::AMQP::Common qw(:all);
 use AnyEvent::RabbitMQ::Channel;
 use AnyEvent::RabbitMQ::LocalQueue;
 
-our $VERSION = '1.00';
+our $VERSION = '1.01';
 
 sub new {
     my $class = shift;
@@ -49,27 +49,37 @@ sub connect {
     my $self = shift;
     my %args = $self->_set_cbs(@_);
 
+    if ($self->{_is_open}) {
+        $args{on_failure}->('Connection has already been opened');
+        return $self;
+    }
+
     $args{on_close}        ||= sub {};
-    $args{on_read_failure} ||= sub {die @_};
+    $args{on_read_failure} ||= sub {warn @_, "\n"};
     $args{timeout}         ||= 0;
 
     if ($self->{verbose}) {
-        print STDERR 'connect to ', $args{host}, ':', $args{port}, '...', "\n";
+        warn 'connect to ', $args{host}, ':', $args{port}, '...', "\n";
     }
 
     $self->{_connect_guard} = AnyEvent::Socket::tcp_connect(
         $args{host},
         $args{port},
         sub {
-            my $fh = shift
-                or return $args{on_failure}->('Error connecting to AMQP Server!');
+            my $fh = shift or return $args{on_failure}->(
+                'Error connecting to AMQP Server: ' . $!
+            );
+
             $self->{_handle} = AnyEvent::Handle->new(
                 fh       => $fh,
                 on_error => sub {
                     my ($handle, $fatal, $message) = @_;
-                    delete $self->{_handle};
-                    $args{on_failure}->($message);
-                }
+
+                    $self->{_channels} = {};
+                    $self->{_is_open} = 0;
+                    $self->_disconnect();
+                    $args{on_close}->($message);
+                },
             );
             $self->_read_loop($args{on_close}, $args{on_read_failure});
             $self->_start(%args,);
@@ -109,17 +119,13 @@ sub _read_loop {
             my ($frame) = Net::AMQP->parse_raw_frames(\$stack);
 
             if ($self->{verbose}) {
-                print STDERR '[C] <-- [S] ' . Dumper($frame);
-                print STDERR '-----------', "\n";
+                warn '[C] <-- [S] ' . Dumper($frame);
+                warn '-----------', "\n";
             }
 
             my $id = $frame->channel;
-            return if !$self->_check_close_and_clean(
-                $frame, $close_cb, $failure_cb, $id,
-            );
-
             if (0 == $id) {
-                return if !$self->_check_close_and_clean($frame, $close_cb, $id,);
+                return if !$self->_check_close_and_clean($frame, $close_cb,);
                 $self->{_queue}->push($frame);
             } else {
                 my $channel = $self->{_channels}->{$id};
@@ -140,7 +146,7 @@ sub _read_loop {
 
 sub _check_close_and_clean {
     my $self = shift;
-    my ($frame, $close_cb, $id,) = @_;
+    my ($frame, $close_cb,) = @_;
 
     return 1 if !$frame->isa('Net::AMQP::Frame::Method');
 
@@ -148,6 +154,7 @@ sub _check_close_and_clean {
     return 1 if !$method_frame->isa('Net::AMQP::Protocol::Connection::Close');
 
     $self->_push_write(Net::AMQP::Protocol::Connection::CloseOk->new());
+    $self->{_channels} = {};
     $self->{_is_open} = 0;
     $self->_disconnect();
     $close_cb->($frame);
@@ -159,7 +166,7 @@ sub _start {
     my %args = @_;
 
     if ($self->{verbose}) {
-        print STDERR 'post header', "\n";
+        warn 'post header', "\n";
     }
 
     $self->{_handle}->push_write(Net::AMQP::Protocol->header);
@@ -183,7 +190,7 @@ sub _start {
                         platform    => 'Perl',
                         product     => __PACKAGE__,
                         information => 'http://d.hatena.ne.jp/cooldaemon/',
-                        version     => '0.01',
+                        version     => '1.01',
                     },
                     mechanism => 'AMQPLAIN',
                     response => {
@@ -253,6 +260,8 @@ sub close {
     my $self = shift;
     my %args = $self->_set_cbs(@_);
 
+    return $self if !$self->{_is_open};
+
     my $close_cb = sub {
         $self->_close(
             sub {
@@ -312,19 +321,26 @@ sub open_channel {
     my $self = shift;
     my %args = $self->_set_cbs(@_);
 
+    return $self if !$self->_check_open($args{on_failure});
+
     $args{on_close} ||= sub {};
 
     my $id = $args{id};
-    return $args{on_failure}->("Channel id $id is already in use")
-        if $id && $self->{_channels}->{$id};
+    if ($id && $self->{_channels}->{$id}) {
+        $args{on_failure}->("Channel id $id is already in use");
+        return $self;
+    }
 
     if (!$id) {
-        for my $candidate_id (1 .. (2**16 - 1)) { # FIXME
+        for my $candidate_id (1 .. (2**16 - 1)) {
             next if defined $self->{_channels}->{$candidate_id};
             $id = $candidate_id;
             last;
         }
-        return $args{on_failure}->('Ran out of channel ids') if !$id;
+        if (!$id) {
+            $args{on_failure}->('Ran out of channel ids');
+            return $self;
+        }
     }
 
     my $channel = AnyEvent::RabbitMQ::Channel->new(
@@ -406,7 +422,7 @@ sub _push_write {
     $output->channel($id || 0);
 
     if ($self->{verbose}) {
-        print STDERR '[C] --> [S] ', Dumper($output), "\n";
+        warn '[C] --> [S] ', Dumper($output);
     }
 
     $self->{_handle}->push_write($output->to_raw_frame());
@@ -421,6 +437,16 @@ sub _set_cbs {
     $args{on_failure} ||= sub {die @_};
 
     return %args;
+}
+
+sub _check_open {
+    my $self = shift;
+    my ($failure_cb) = @_;
+
+    return 1 if $self->{_is_open};
+
+    $failure_cb->('Connection has already been closed');
+    return 0;
 }
 
 sub DESTROY {
@@ -482,7 +508,7 @@ AnyEvent::RabbitMQ - An asynchronous and multi channel Perl AMQP client.
 
 =head1 DESCRIPTION
 
-AnyEvent::RabbitMQ is an AMQP(Advanced Message Queuing Protocol) client library, that is intended to allow you to interact with AMQP-compliant message brokers/servers such as RabbitMQ in a Asynchronous fashion.
+AnyEvent::RabbitMQ is an AMQP(Advanced Message Queuing Protocol) client library, that is intended to allow you to interact with AMQP-compliant message brokers/servers such as RabbitMQ in an asynchronous fashion.
 
 You can use AnyEvent::RabbitMQ to -
 
