@@ -15,7 +15,7 @@ use Net::AMQP::Common qw(:all);
 use AnyEvent::RabbitMQ::Channel;
 use AnyEvent::RabbitMQ::LocalQueue;
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
 sub new {
     my $class = shift;
@@ -79,6 +79,11 @@ sub connect {
                     $self->{_is_open} = 0;
                     $self->_disconnect();
                     $args{on_close}->($message);
+                },
+                on_drain => sub {
+                    my ($handle) = @_;
+                    $self->{drain_condvar}->send
+                        if exists $self->{drain_condvar};
                 },
             );
             $self->_read_loop($args{on_close}, $args{on_read_failure});
@@ -190,7 +195,7 @@ sub _start {
                         platform    => 'Perl',
                         product     => __PACKAGE__,
                         information => 'http://d.hatena.ne.jp/cooldaemon/',
-                        version     => '1.01',
+                        version     => __PACKAGE__->VERSION,
                     },
                     mechanism => 'AMQPLAIN',
                     response => {
@@ -260,7 +265,10 @@ sub close {
     my $self = shift;
     my %args = $self->_set_cbs(@_);
 
-    return $self if !$self->{_is_open};
+    if (!$self->{_is_open}) {
+        $args{on_success}->(@_);
+        return $self;
+    }
 
     my $close_cb = sub {
         $self->_close(
@@ -281,7 +289,9 @@ sub close {
     }
 
     for my $id (keys %{$self->{_channels}}) {
-         $self->{_channels}->{$id}->close(
+         my $channel = $self->{_channels}->{$id}
+            or next; # Could have already gone away on global destruction..
+         $channel->close(
             on_success => $close_cb,
             on_failure => sub {
                 $close_cb->();
@@ -393,6 +403,7 @@ sub _push_read_and_valid {
         $failure_cb->('Unknown channel id: ' . $id);
     }
 
+    return unless $queue; # Can go away in global destruction..
     $queue->get(sub {
         my $frame = shift;
 
@@ -425,7 +436,8 @@ sub _push_write {
         warn '[C] --> [S] ', Dumper($output);
     }
 
-    $self->{_handle}->push_write($output->to_raw_frame());
+    $self->{_handle}->push_write($output->to_raw_frame())
+        if $self->{_handle}; # Careful - could have gone (global destruction)
     return;
 }
 
@@ -447,6 +459,18 @@ sub _check_open {
 
     $failure_cb->('Connection has already been closed');
     return 0;
+}
+
+sub drain_writes {
+    my ($self, $timeout) = shift;
+    $self->{drain_condvar} = AnyEvent->condvar;
+    if ($timeout) {
+        $self->{drain_timer} = AnyEvent->timer( after => $timeout, sub {
+            $self->{drain_condvar}->croak("Timed out after $timeout");
+        });
+    }
+    $self->{drain_condvar}->recv;
+    delete $self->{drain_timer};
 }
 
 sub DESTROY {

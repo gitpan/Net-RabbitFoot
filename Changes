@@ -1,5 +1,11 @@
 Revision history for Perl extension RabbitFoot
 
+1.02    Wed Jun 30 11:35:32 2010
+        - Fix errors in global destruction due to destruction order being
+          random.
+        - Fix bug if you call ->close on a Net::RabbitFoot instance which
+          is not already connected. Previously this would never return.
+
 1.01    Sun Mar 18 07:21:58 2010
         - fix bugs.
         - support channel.flow.
