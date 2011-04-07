@@ -7,11 +7,9 @@ use AnyEvent::RabbitMQ;
 use Coro;
 use Coro::AnyEvent;
 
-use File::ShareDir ();
-
 use Net::RabbitFoot::Channel;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 BEGIN {
     for my $method (qw(connect close)) {
@@ -31,15 +29,18 @@ sub new {
     }, $class;
 }
 
+sub ar {
+    return shift->{_ar};
+}
+
 sub load_xml_spec {
     my $self = shift;
     $self->{_ar}->load_xml_spec(@_);
     return $self;
 }
 
-sub default_amqp_spec {
-    my $dir = File::ShareDir::module_dir(__PACKAGE__);
-    return "$dir/fixed_amqp0-8.xml";
+sub server_properties {
+    return shift->{_ar}->server_properties();
 }
 
 sub open_channel {
@@ -50,9 +51,9 @@ sub open_channel {
 }
 
 sub _do {
-    my $self   = shift;
+    my $self = shift;
     my $method = shift;
-    my %args   = @_;
+    my %args = @_;
 
     my $cb = Coro::rouse_cb;
     $args{on_success} = sub {$cb->(1, @_);},
@@ -75,13 +76,11 @@ Net::RabbitFoot - An Asynchronous and multi channel Perl AMQP client.
 
   use Net::RabbitFoot;
 
-  my $rf = Net::RabbitFoot->new()->load_xml_spec(
-      '/path/to/amqp0-8.xml',
-  )->connect(
-      host    => 'localhosti',
+  my $rf = Net::RabbitFoot->new()->load_xml_spec()->connect(
+      host    => 'localhost',
       port    => 5672,
       user    => 'guest',
-      port    => 'guest',
+      pass    => 'guest',
       vhost   => '/',
       timeout => 1,
   );
@@ -101,11 +100,15 @@ You can use Net::RabbitFoot to -
   * Publish, consume, get, ack and recover messages
   * Select, commit and rollback transactions
 
-Net::RabbitFoot is known to work with RabbitMQ versions 1.7.2 and version 0-8 of the AMQP specification.
+Net::RabbitFoot is known to work with RabbitMQ versions 2.3.1 and version 0-8 of the AMQP specification.
 
 =head1 AUTHOR
 
 Masahito Ikuta E<lt>cooldaemon@gmail.comE<gt>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2010, the above named author(s).
 
 =head1 SEE ALSO
 

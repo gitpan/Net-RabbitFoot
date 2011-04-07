@@ -8,7 +8,7 @@ use Coro::AnyEvent;
 
 use AnyEvent::RabbitMQ::Channel;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 BEGIN {
     for my $method (qw(
@@ -34,7 +34,7 @@ BEGIN {
         };
     }
 
-    for my $method (qw(publish ack recover)) {
+    for my $method (qw(publish ack recover reject)) {
         no strict 'refs';
         *{__PACKAGE__ . '::' . $method} = sub {
             my $self = shift;
